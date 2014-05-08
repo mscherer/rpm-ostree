@@ -30,7 +30,14 @@
 #include "rpmostree-util.h"
 #include "rpmostree-postprocess.h"
 
-#include "libgsystem.h"
+#include <libhif.h>
+#include <libhif/hif-repos.h>
+#include <libhif/hif-context-private.h>
+#include <libhif/hif-transaction.h>
+#include <libhif/hif-goal.h>
+#include <libhif/hif-package.h>
+#include <libhif/hif-sack.h>
+#include "rpmostree-privcleanup.h"
 
 static char *opt_workdir;
 static gboolean opt_workdir_tmpfs;
@@ -801,6 +808,8 @@ rpmostree_compose_builtin_tree (int             argc,
   gs_free char *cachekey = NULL;
   gs_free char *cached_compose_checksum = NULL;
   gs_free char *new_compose_checksum = NULL;
+  gs_unref_object HifContext *hifctx = NULL;
+  gs_unref_object HifRepos *hifrepos = NULL;
   gs_unref_object GFile *workdir = NULL;
   gs_unref_object GFile *cachedir = NULL;
   gs_unref_object GFile *yumroot = NULL;
@@ -939,6 +948,80 @@ rpmostree_compose_builtin_tree (int             argc,
   if (!ref)
     goto out;
 
+  hifctx = hif_context_new ();
+
+  {
+    GFile *contextdir;
+    gs_unref_object GFile *metadata_cache_path = g_file_get_child (workdir, "metadata");
+    gs_unref_object GFile *solv_cache_path = g_file_get_child (workdir, "solv");
+
+    g_assert (self->treefile_context_dirs->len > 0);
+    contextdir = self->treefile_context_dirs->pdata[0];
+    
+    hif_context_set_repo_dir (hifctx, gs_file_get_path_cached (contextdir));
+    
+    if (!gs_file_ensure_directory (metadata_cache_path, FALSE, cancellable, error))
+      goto out;
+    if (!gs_file_ensure_directory (solv_cache_path, FALSE, cancellable, error))
+      goto out;
+
+    hif_context_set_cache_dir (hifctx, gs_file_get_path_cached (metadata_cache_path));
+    hif_context_set_solv_dir (hifctx, gs_file_get_path_cached (solv_cache_path));
+  }
+  hif_context_set_install_root (hifctx, gs_file_get_path_cached (yumroot));
+  hif_context_set_check_disk_space (hifctx, TRUE);
+  hif_context_set_check_transaction (hifctx, TRUE);
+  hif_context_set_keep_cache (hifctx, FALSE);
+
+  if (!hif_context_setup (hifctx, cancellable, error))
+    goto out;
+
+  {
+    JsonArray *enable_repos = NULL;
+    HySack hysack = hif_context_get_sack (hifctx);
+    gs_unref_ptrarray GPtrArray *hifsources = NULL;
+    gs_unref_hashtable GHashTable *enable_repo_ids =
+      g_hash_table_new (g_str_hash, g_str_equal);
+
+    hifrepos = hif_repos_new (hifctx);
+    hifsources = hif_repos_get_sources (hifrepos, error);
+    if (!hifsources)
+      goto out;
+    for (i = 0; i < hifsources->len; i++)
+      {
+        HifSource *src = hifsources->pdata[i];
+        hif_source_set_enabled (src, FALSE);
+      }
+
+    if (json_object_has_member (treefile, "repos"))
+      enable_repos = json_object_get_array_member (treefile, "repos");
+    if (enable_repos)
+      {
+        guint i;
+        guint n = json_array_get_length (enable_repos);
+        for (i = 0; i < n; i++)
+          {
+            const char *reponame = array_require_string_element (enable_repos, i, error);
+            HifSource *src;
+            if (!reponame)
+              goto out;
+
+            src = hif_repos_get_source_by_id (hifrepos, reponame, error);
+            if (!src)
+              goto out;
+            g_debug ("enabling source %s", hif_source_get_id (src));
+            hif_source_set_enabled (src, TRUE);
+            if (!hif_sack_add_source (hysack,
+                                      src,
+                                      G_MAXUINT,
+                                      0,
+                                      hif_context_get_state (hifctx),
+                                      error))
+              goto out;
+          }
+      }
+  }
+
   ref_unix = g_strdelimit (g_strdup (ref), "/", '_');
 
   bootstrap_packages = g_ptr_array_new ();
@@ -950,9 +1033,63 @@ rpmostree_compose_builtin_tree (int             argc,
     goto out;
   g_ptr_array_add (packages, NULL);
 
-  if (!yuminstall (self, treefile, yumroot, workdir,
-                   (char**)packages->pdata,
-                   cancellable, error))
+  {
+    guint i;
+
+    for (i = 0; i < packages->len; i++)
+      {
+        const char *pkg = packages->pdata[i];
+
+        if (!pkg)
+          continue;
+
+        g_print ("Preparing installation: %s\n", pkg);
+
+        if (!hif_context_install (hifctx, pkg, error))
+          goto out;
+      }
+  }
+
+  {
+    HifTransaction *hiftxn = hif_context_get_transaction (hifctx);
+    HySack hysack = hif_context_get_sack (hifctx);
+    HyGoal hygoal = hif_context_get_goal (hifctx);
+    _cleanup_hyquery_ HyQuery hyquery = NULL;
+    _cleanup_hypackagelist_ HyPackageList pkglist = NULL;
+    gs_unref_ptrarray GPtrArray *packages = NULL;
+
+    g_assert (hysack != NULL);
+    g_assert (hygoal != NULL);
+    
+    {
+      guint64 txnflags = hif_transaction_get_flags (hiftxn);
+      txnflags &= ~((guint64)HIF_TRANSACTION_FLAG_ONLY_TRUSTED);
+      hif_transaction_set_flags (hiftxn, txnflags);
+    }
+
+    g_debug ("Preparing depsolve");
+
+    if (!hif_transaction_depsolve (hiftxn, hygoal, NULL, error))
+      {
+        g_prefix_error (error, "depsolve: ");
+        goto out;
+      }
+
+    hyquery = hy_query_create (hysack);
+    hy_query_filter (hyquery, HY_PKG_ARCH, HY_NEQ, "src");
+    pkglist = hy_query_run (hyquery);
+
+    packages = hif_goal_get_packages (hygoal, HIF_PACKAGE_INFO_INSTALL, -1);
+    g_print ("Installing:\n");
+    for (i = 0; i < packages->len; i++)
+      {
+        HyPackage pkg = packages->pdata[i];
+        gs_free char *nevra = hy_package_get_nevra (pkg);
+        g_print ("  %s\n", nevra);
+      }
+  }
+
+  if (!hif_context_run (hifctx, cancellable, error))
     goto out;
 
   cachekey = g_strconcat ("treecompose/", ref, NULL);

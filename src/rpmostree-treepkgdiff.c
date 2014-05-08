@@ -26,24 +26,9 @@
 #include "rpmostree-util.h"
 #include <ostree.h>
 
-#include <hawkey/packagelist.h>
-#include <hawkey/query.h>
-#include <hawkey/sack.h>
-#include <hawkey/stringarray.h>
-#include <hawkey/goal.h>
-#include <hawkey/version.h>
-#include <hawkey/util.h>
 #include "hif-utils.h"
 
-#include "libgsystem.h"
-
-_RPMOSTREE_DEFINE_TRIVIAL_CLEANUP_FUNC(HySack, hy_sack_free);
-_RPMOSTREE_DEFINE_TRIVIAL_CLEANUP_FUNC(HyQuery, hy_query_free);
-_RPMOSTREE_DEFINE_TRIVIAL_CLEANUP_FUNC(HyPackageList, hy_packagelist_free);
-
-#define _cleanup_hysack_ __attribute__((cleanup(hy_sack_freep)))
-#define _cleanup_hyquery_ __attribute__((cleanup(hy_query_freep)))
-#define _cleanup_hypackagelist_ __attribute__((cleanup(hy_packagelist_freep)))
+#include "rpmostree-privcleanup.h"
 
 static gboolean
 get_pkglist_for_root (GFile            *root,
