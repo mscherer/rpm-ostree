@@ -976,6 +976,17 @@ rpmostree_compose_builtin_tree (int             argc,
   if (!hif_context_setup (hifctx, cancellable, error))
     goto out;
 
+  /* Both RPM and librepo try to intercept these.  We don't want that,
+   * we we *can* be interrupted sanely by just having the process die,
+   * since we never live-mutate a system.
+   */
+  {
+    struct sigaction act;
+    memset (&act, 0, sizeof (act));
+    sigaction (SIGINT, &act, NULL);
+    sigaction (SIGTERM, &act, NULL);
+  }
+
   {
     JsonArray *enable_repos = NULL;
     HySack hysack = hif_context_get_sack (hifctx);
