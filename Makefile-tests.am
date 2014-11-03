@@ -39,3 +39,9 @@ insttest_DATA = tests/libtest.sh \
 	 mv $@.tmp $@)
 
 endif
+
+TESTS = check_migrate_passwd
+check_PROGRAMS = check_migrate_passwd
+check_migrate_passwd_SOURCES = $(top_builddir)/tests/check_migrate_passwd.c $(top_builddir)/src/rpmostree-postprocess.h
+check_migrate_passwd_CFLAGS = @CHECK_CFLAGS@ $(rpm_ostree_CFLAGS)
+check_migrate_passwd_LDADD = $(top_builddir)/.libs/librpmostree.la @CHECK_LIBS@

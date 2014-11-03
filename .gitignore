@@ -12,6 +12,7 @@ Makefile
 Makefile.in
 aclocal.m4
 autom4te.cache
+check_migrate_passwd*
 compile
 config.guess
 config.h
@@ -28,6 +29,7 @@ libtool
 ltmain.sh
 missing
 stamp-h1
+test-suite.log
 ylwrap
 py-compile
 config

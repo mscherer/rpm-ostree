@@ -58,6 +58,8 @@ AC_ARG_ENABLE(usrbinatomic,
               [enable_usrbinatomic=no])
 AM_CONDITIONAL(BUILDOPT_USRBINATOMIC, [test x$enable_usrbinatomic = xyes])
 
+AM_PATH_CHECK()
+
 dnl Some distributions may want to support the client tooling, but not
 dnl the server side.
 AC_ARG_ENABLE(compose-tooling,

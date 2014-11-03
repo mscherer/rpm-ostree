@@ -1,0 +1,251 @@
+#!/usr/bin/perl
+#
+# migrate-helper - test setup & checker for 'make check'
+#
+# $Id$
+#
+package RpmOstreeToolbox::Tests::MigrateHelper;
+
+use strict;
+use warnings;
+
+(our $ME = $0) =~ s|.*/||;
+(our $VERSION = '$Revision: 0.0 $ ') =~ tr/[0-9].//cd;
+
+# For debugging, show data structures using DumpTree($var)
+#use Data::TreeDumper; $Data::TreeDumper::Displayaddress = 0;
+
+###############################################################################
+# BEGIN user-customizable section
+
+# Passwd file entries. Root will always go into /etc, the rest to /usr/lib
+our $root = "root:x:0:0:root:/root:/bin/bash\n";
+our $rest = <<'END_REST';
+bin:x:1:1:bin:/bin:/sbin/nologin
+daemon:x:2:2:daemon:/sbin:/sbin/nologin
+adm:x:3:4:adm:/var/adm:/sbin/nologin
+lp:x:4:7:lp:/var/spool/lpd:/sbin/nologin
+sync:x:5:0:sync:/sbin:/bin/sync
+shutdown:x:6:0:shutdown:/sbin:/sbin/shutdown
+halt:x:7:0:halt:/sbin:/sbin/halt
+mail:x:8:12:mail:/var/spool/mail:/sbin/nologin
+operator:x:11:0:operator:/root:/sbin/nologin
+games:x:12:100:games:/usr/games:/sbin/nologin
+ftp:x:14:50:FTP User:/var/ftp:/sbin/nologin
+nobody:x:99:99:Nobody:/:/sbin/nologin
+cloud-user:x:1000:1000:Cloud User:/home/cloud-user:/bin/bash
+END_REST
+
+our @Tests = ({
+    setup  => "$root$rest",
+    expect => { '/etc' => $root,
+                '/usr/lib' => $rest,
+            },
+});
+
+#
+# FIXME: if/when migrate_etc() does bad-uid-fixing, enable this test:
+#
+if (0) {
+    use Clone qw(clone);
+    $Tests[1] = clone($Tests[0]);
+
+    # Change one UID in the _setup_, but not our expect: migrate_etc() should
+    # revert it back to its required value.
+    #
+    # FIXME 2014-11-03 in real life we expect migrate_etc() to implement
+    # this in two steps:
+    #    1) an error-abort if we get a UID mismatch
+    #    2) (later) actual fix-uid and related chowns.
+    # Between 1) and 2), if you enable this test, we expect make check
+    # to fail. THIS IS GOOD. It would mean the test is working. If you
+    # need to make the test suite pass, you'll have to invent some mechanism
+    # for telling the test suite that migrate_etc() should abort on
+    # such-and-such test.
+    #
+    $Tests[1]{setup} =~ s/:x:12:/:x:15:/;
+}
+
+
+###############################################################################
+# BEGIN test definitions
+
+
+# END   user-customizable section
+###############################################################################
+
+use File::Path          qw(rmtree);
+
+###############################################################################
+# BEGIN boilerplate args checking, usage messages
+
+sub usage {
+    print  <<"END_USAGE";
+Usage: $ME [OPTIONS] ACTION FILE TESTINDEX TEMPDIR
+
+$ME is a helper for:
+
+   rpmostree-postprocess.c : migrate_passwd_file_except_root()
+
+ACTION is one of:
+
+    numtests        print (to stdout) the number of tests we know
+    setup           write /etc/passwd file to TEMPDIR for test case TESTINDEX
+    check           check /etc/passwd and /usr/lib/passwd for TESTINDEX
+                    (emitting any errors to stdout)
+
+FILE is one of 'passwd' or 'group'
+
+TESTINDEX is an integer index, 0 through FIXME
+
+TEMPDIR is a path to a temporary directory. It must exist. We will
+delete it (in the 'check' step) upon successful termination.
+
+OPTIONS:
+
+  -v, --verbose  show verbose progress indicators
+  -n, --dry-run  make no actual changes
+
+  --help         display this message
+  --version      display program name and version
+END_USAGE
+
+    exit;
+}
+
+# Command-line options.  Note that this operates directly on @ARGV !
+our $debug   = 0;
+our $force   = 0;
+our $verbose = 0;
+our $NOT     = '';              # print "blahing the blah$NOT\n" if $debug
+sub handle_opts {
+    use Getopt::Long;
+    GetOptions(
+        'debug!'     => \$debug,
+        'dry-run|n!' => sub { $NOT = ' [NOT]' },
+        'force'      => \$force,
+        'verbose|v'  => \$verbose,
+
+        help         => \&usage,
+        version      => sub { print "$ME version $VERSION\n"; exit 0 },
+    ) or die "Try `$ME --help' for help\n";
+}
+
+# END   boilerplate args checking, usage messages
+###############################################################################
+
+############################## CODE BEGINS HERE ###############################
+
+# The term is "modulino".
+__PACKAGE__->main()                                     unless caller();
+
+# Main code.
+sub main {
+    # Note that we operate directly on @ARGV, not on function parameters.
+    # This is deliberate: it's because Getopt::Long only operates on @ARGV
+    # and there's no clean way to make it use @_.
+    handle_opts();                      # will set package globals
+
+    # Fetch command-line arguments.  Barf if too many.
+    #
+    # first: action
+    my $action = shift(@ARGV)
+        or die "$ME: missing ACTION argument; try $ME --help\n";
+    my $handler = __PACKAGE__->can("_handle_$action")
+        or die "$ME: Unknown action '$action'; try $ME --help\n";
+
+    # next: passwd or group
+    my $which_file = shift(@ARGV)
+        or die "$ME: missing PASSWD-OR-GROUP argument; try $ME --help\n";
+    $which_file =~ /^(passwd|group)$/
+        or die "$ME: '$which_file' is not passwd or group; try $ME --help\n";
+
+    # next: test case number (0 ... N)
+    my $testnum = shift(@ARGV);
+    defined $testnum
+        or die "$ME: missing TESTCASE argument; try $ME --help\n";
+    $testnum =~ /^\d+$/
+        or die "$ME: invalid TESTCASE ('$testnum' is not a number)\n";
+    $testnum <= $#Tests
+        or die "$ME: nonexistent TESTCASE\n";
+    my $test = $Tests[$testnum];
+
+    # last: temporary directory in which to write files (setup) or check (check)
+    my $tempdir = shift(@ARGV)
+        or die "$ME: missing TEMPDIR argument; try $ME --help\n";
+    -d $tempdir
+        or die "$ME: FATAL: tempdir '$tempdir' does not exist\n";
+
+    die "$ME: Too many arguments; try $ME --help\n"                 if @ARGV;
+
+    # All arguments OK.
+    #
+    # Special case: if 'group', lop off extra fields. We use the same test
+    # string, on the assumption that there's nothing uniquely different
+    # about the /etc/group data.
+    #
+    if ($which_file eq 'group') {
+        $test->{setup}      =~ s|^([^:]+:[^:]+:[^:]+:).*|$1|gm;
+        $test->{expect}{$_} =~ s|^([^:]+:[^:]+:[^:]+:).*|$1|gm
+            for keys %{$test->{expect}};
+    }
+
+    # Run our code
+    $handler->( $test, $which_file, $tempdir );
+}
+
+
+sub _handle_numtests {
+    print scalar(@Tests), "\n";
+}
+
+sub _handle_setup {
+    my ($test, $which_file, $tempdir) = @_;
+
+    chdir $tempdir
+        or die "$ME: Cannot cd $tempdir: $!\n";
+
+    mkdir $_, 0755 for qw(etc usr usr/lib);
+
+    open my $fh, ">", "etc/$which_file"
+        or die "Cannot create $tempdir/etc/$which_file: $!";
+    print { $fh } $test->{setup};
+    close $fh
+        or die "Error writing $tempdir/etc/$which_file: $!";
+}
+
+###################
+#  _handle_check  #  called after migrate_etc().
+###################
+#
+# Check that the initial /etc/passwd has been split into two, and that
+# the contents of each file are what we expect.
+#
+sub _handle_check {
+    my ($test, $which_file, $tempdir) = @_;
+
+    chdir $tempdir
+        or die "$ME: Cannot cd $tempdir: $!\n";
+
+    for my $path (sort keys %{$test->{expect}}) {
+        my $expect = $test->{expect}{$path};
+
+        open my $fh, '<', ".$path/$which_file"
+            or die "Could not read .$path/$which_file: $!";
+        my $actual = do { local $/ = undef; <$fh>; };
+        close $fh;
+
+        if ($actual ne $expect) {
+            # FIXME: give a useful diff
+            print "FAILED: $tempdir$path/$which_file\n";
+            # don't clean up
+            exit 0;
+        }
+    }
+
+    # Clean up
+    chdir '/';
+    rmtree($tempdir);
+}
+
+1;
