@@ -248,8 +248,17 @@ append_repo_and_cache_opts (RpmOstreeTreeComposeContext *self,
       for (i = 0; i < n; i++)
         {
           const char *reponame = _rpmostree_jsonutil_array_require_string_element (enable_repos, i, error);
+          gs_free char *repofile = NULL;
           if (!reponame)
             goto out;
+          repofile = g_strconcat (g_get_current_dir(), "/", reponame, ".repo", NULL);
+          if (!g_file_test(repofile, (G_FILE_TEST_EXISTS|G_FILE_TEST_IS_REGULAR)))
+          {
+            g_set_error (error, G_FILE_ERROR,
+                         g_file_error_from_errno (ENOENT),
+                         "The repo file %s do not exist", repofile);
+            goto out;
+          }
           g_ptr_array_add (args, g_strconcat ("--enablerepo=", reponame, NULL));
         }
     }
