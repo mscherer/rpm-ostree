@@ -1022,6 +1022,7 @@ rpmostree_treefile_postprocessing (GFile         *yumroot,
   JsonArray *remove = NULL;
   const char *default_target = NULL;
   const char *postprocess_script = NULL;
+  const char *ansible_playbook = NULL;
 
   if (json_object_has_member (treefile, "units"))
     units = json_object_get_array_member (treefile, "units");
@@ -1159,6 +1160,33 @@ rpmostree_treefile_postprocessing (GFile         *yumroot,
           if (!handle_remove_files_from_package (yumroot, sack, elt, cancellable, error))
             goto out;
         }
+    }
+
+  if (!_rpmostree_jsonutil_object_get_optional_string_member (treefile, "ansible-playbook",
+                                                              &ansible_playbook, error))
+    goto out;
+
+  if (ansible_playbook)
+
+    {
+      pid_t child;
+      const char *yumroot_path = gs_file_get_path_cached (yumroot);
+      gs_free char *inventory = g_strconcat (yumroot_path, ",", NULL);
+      char * child_argv[] = { "ansible-playbook", "-c", "chroot", "-i", inventory, ansible_playbook, NULL };
+      g_print ("Executing ansible playbook '%s'...starting\n", ansible_playbook);
+      if ((child = fork ()) < 0)
+        goto out;
+
+      if (child == 0) {
+        if (execvp ("ansible-playbook", child_argv) != 0)
+          _rpmostree_perror_fatal ("execvp");
+
+         g_assert_not_reached ();
+      }
+
+      if (!_rpmostree_sync_wait_on_pid (child, error))
+        goto out;
+      g_print ("Executing ansible playbook '%s'...done\n", ansible_playbook);
     }
 
   if (!_rpmostree_jsonutil_object_get_optional_string_member (treefile, "postprocess-script",

@@ -126,6 +126,12 @@ Treefile
 
    Note this does not alter the RPM database, so `rpm -V` will complain.
 
+ * `ansible-playbook`: String, optional: Full filesystem path to a ansible
+   playbook that will be executed outside of the target tree, with the chroot
+   connexion of ansible. Make sure to install python inside the target tree to
+   use most modules, and if you wish to install something with yum, you need to
+   also have yum inside.
+
  * `include`: string, optional: Path to another treefile which will be
    used as an inheritance base.  The semantics for inheritance are:
    Non-array values in child values override parent values.  Array
